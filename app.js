@@ -158,12 +158,40 @@ function setupMQTT() {
             // message is a Buffer
             const arrayBuf = new Uint8Array(message);
             if (arrayBuf.length > 0) {
-                const decryptedText = await decryptText(arrayBuf);
-                if (decryptedText !== null && sharedText.value !== decryptedText) {
-                    isUpdatingFromNetwork = true;
-                    sharedText.value = decryptedText;
-                    isUpdatingFromNetwork = false;
-                    setSaveStatus('saved', 'Synced securely to network');
+                const decryptedPayload = await decryptText(arrayBuf);
+                if (decryptedPayload !== null) {
+                    let data;
+                    try {
+                        data = JSON.parse(decryptedPayload);
+                    } catch (e) {
+                        // Backwards compatibility for old raw text
+                        data = { text: decryptedPayload, timestamp: Date.now() };
+                    }
+
+                    const ageInMs = Date.now() - data.timestamp;
+                    const twoDaysInMs = 2 * 24 * 60 * 60 * 1000;
+
+                    if (ageInMs > twoDaysInMs) {
+                        // Data is expired! Clear it from our screen and the network.
+                        if (sharedText.value !== '') {
+                            isUpdatingFromNetwork = true;
+                            sharedText.value = '';
+                            isUpdatingFromNetwork = false;
+                        }
+                        // Only publish clear message if we are the one discovering it's expired
+                        // to prevent an infinite loop, check if we actually cleared it locally.
+                        // But actually, just calling publishText('') is fine, the debounce will handle it, or we just do it manually.
+                        // Actually, it's safer to just set the value to empty and let the user overwrite it, or explicitly publish an empty text.
+                        publishText('');
+                        setSaveStatus('saved', 'Expired data cleared');
+                    } else {
+                        if (sharedText.value !== data.text) {
+                            isUpdatingFromNetwork = true;
+                            sharedText.value = data.text;
+                            isUpdatingFromNetwork = false;
+                            setSaveStatus('saved', 'Synced securely to network');
+                        }
+                    }
                 }
             }
             return;
@@ -193,7 +221,12 @@ async function publishText(text) {
     setSaveStatus('saving', 'Saving securely...');
     
     try {
-        const encrypted = await encryptText(text);
+        const payload = JSON.stringify({
+            text: text,
+            timestamp: Date.now()
+        });
+        
+        const encrypted = await encryptText(payload);
         // Publish with retain: true so latecomers get the text instantly
         mqttClient.publish(`localshare/room/${roomId}/text`, encrypted, { retain: true, qos: 1 }, (err) => {
             if (!err) {
