@@ -1,0 +1,6 @@
+# Ignore the chat history context file
+chat_history.md
+
+# OS generated files
+.DS_Store
+Thumbs.db
