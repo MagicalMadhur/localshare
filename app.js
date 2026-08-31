@@ -25,6 +25,7 @@ const sharedText = document.getElementById('sharedText');
 const textSaveStatus = document.getElementById('textSaveStatus');
 const textSaveMsg = document.getElementById('textSaveMsg');
 const copyBtn = document.getElementById('copyBtn');
+const clearBtn = document.getElementById('clearBtn');
 const copyToast = document.getElementById('copyToast');
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
@@ -473,6 +474,11 @@ copyBtn.addEventListener('click', () => {
         copyToast.classList.remove('hidden');
         setTimeout(() => copyToast.classList.add('hidden'), 2000);
     });
+});
+
+clearBtn.addEventListener('click', () => {
+    sharedText.value = '';
+    publishText('');
 });
 
 dropZone.addEventListener('dragover', e => {
