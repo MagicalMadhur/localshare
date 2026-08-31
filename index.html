@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LocalShare - Local Network P2P Sharing</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- MQTT.js for signaling -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+</head>
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <div class="logo">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+                <h1>LocalShare</h1>
+            </div>
+            <div class="status-badge" id="connectionStatus">
+                <span class="status-dot connecting"></span>
+                <span id="statusText">Initializing...</span>
+            </div>
+        </header>
+
+        <main>
+            <section class="card text-sharing">
+                <div class="card-header">
+                    <h2>Text Sharing</h2>
+                    <span class="subtitle">Updates instantly for connected devices</span>
+                </div>
+                <textarea id="sharedText" placeholder="Type or paste text here... it will sync automatically with other devices on your network."></textarea>
+                <div class="action-bar">
+                    <button id="copyBtn" class="btn secondary">Copy to Clipboard</button>
+                    <span id="copyToast" class="toast hidden">Copied!</span>
+                </div>
+            </section>
+
+            <section class="card file-sharing">
+                <div class="card-header">
+                    <h2>File Sharing</h2>
+                    <span class="subtitle">Direct P2P transfer, no size limits</span>
+                </div>
+                <div class="drop-zone" id="dropZone">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                    <p>Drag & Drop files here</p>
+                    <span>or</span>
+                    <label for="fileInput" class="btn primary">Browse Files</label>
+                    <input type="file" id="fileInput" multiple hidden>
+                </div>
+
+                <div class="transfers" id="transfersContainer">
+                    <!-- Transfer items will appear here -->
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>Your data never leaves your devices. Transferred securely via WebRTC.</p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
