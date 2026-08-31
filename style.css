@@ -177,6 +177,22 @@ textarea:focus {
     gap: 1rem;
 }
 
+.save-status {
+    margin-right: auto; /* Push it to the left */
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    transition: color 0.3s;
+}
+.save-status.saved {
+    color: var(--success);
+}
+.save-status.saving {
+    color: #eab308;
+}
+
 .btn {
     padding: 0.5rem 1rem;
     border: none;

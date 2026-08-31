@@ -11,14 +11,19 @@ const CHUNK_SIZE = 64 * 1024; // 64 KB for WebRTC DataChannel
 // State
 let myPeerId = generateId();
 let roomId = null;
+let cryptoKey = null;
 let mqttClient = null;
 let peers = {}; // mapping peerId -> { pc, dataChannel }
 let receiveBuffers = {}; // file transfer buffers
+let typingTimeout = null;
+let isUpdatingFromNetwork = false;
 
 // UI Elements
 const statusDot = document.querySelector('.status-dot');
 const statusText = document.getElementById('statusText');
 const sharedText = document.getElementById('sharedText');
+const textSaveStatus = document.getElementById('textSaveStatus');
+const textSaveMsg = document.getElementById('textSaveMsg');
 const copyBtn = document.getElementById('copyBtn');
 const copyToast = document.getElementById('copyToast');
 const dropZone = document.getElementById('dropZone');
@@ -31,9 +36,12 @@ async function init() {
     try {
         updateStatus('Getting IP...', 'connecting');
         const ip = await getPublicIP();
-        roomId = await hashString(ip);
         
-        updateStatus('Connecting to signaling server...', 'connecting');
+        // Derive Room ID and Crypto Key from IP
+        roomId = await hashString(ip);
+        cryptoKey = await deriveKey(ip);
+        
+        updateStatus('Connecting to network...', 'connecting');
         setupMQTT();
     } catch (err) {
         console.error('Init error:', err);
@@ -54,6 +62,50 @@ async function hashString(str) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 16);
 }
 
+// --- Encryption (Web Crypto API) ---
+
+async function deriveKey(password) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+        "raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits", "deriveKey"]
+    );
+    // Use a static salt based on the app name for consistent derivation across devices
+    const salt = enc.encode("LocalShareSalt");
+    return crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
+        keyMaterial, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+    );
+}
+
+async function encryptText(text) {
+    const enc = new TextEncoder();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: iv }, cryptoKey, enc.encode(text)
+    );
+    // Combine IV and Ciphertext
+    const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+    combined.set(iv, 0);
+    combined.set(new Uint8Array(ciphertext), iv.length);
+    return combined;
+}
+
+async function decryptText(combinedArray) {
+    try {
+        const iv = combinedArray.slice(0, 12);
+        const ciphertext = combinedArray.slice(12);
+        const decrypted = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: iv }, cryptoKey, ciphertext
+        );
+        return new TextDecoder().decode(decrypted);
+    } catch (e) {
+        console.error("Decryption failed", e);
+        return null;
+    }
+}
+
+// --- Utilities ---
+
 function generateId() {
     return Math.random().toString(36).substring(2, 10);
 }
@@ -63,31 +115,60 @@ function updateStatus(text, state) {
     statusDot.className = `status-dot ${state}`;
 }
 
+function setSaveStatus(state, msg) {
+    textSaveStatus.className = `save-status ${state}`;
+    textSaveMsg.textContent = msg;
+}
+
 function updateConnectionCount() {
     const count = Object.keys(peers).filter(id => peers[id].dataChannel && peers[id].dataChannel.readyState === 'open').length;
     if (count > 0) {
-        updateStatus(`Connected to ${count} device(s)`, 'connected');
+        updateStatus(`Files: Ready | Connected to ${count} device(s)`, 'connected');
     } else {
-        updateStatus('Looking for peers on this network...', 'connecting');
+        updateStatus('Files: Waiting for peer | Text: Synced to network', 'connecting');
     }
 }
 
-// --- Signaling (MQTT) ---
+// --- Signaling & PubSub (MQTT) ---
 
 function setupMQTT() {
-    // using mqtt global from mqtt.min.js
     mqttClient = mqtt.connect(MQTT_BROKER);
 
     mqttClient.on('connect', () => {
-        const topic = `localshare/room/${roomId}`;
-        mqttClient.subscribe(topic, () => {
-            updateConnectionCount(); // Will show "Looking for peers"
-            // Announce presence
+        const baseTopic = `localshare/room/${roomId}`;
+        
+        // Subscribe to signaling and text updates
+        mqttClient.subscribe(baseTopic, () => {
+            updateConnectionCount(); 
             broadcastSignaling({ type: 'hello', peerId: myPeerId });
+        });
+        
+        // Subscribe to text persistence topic
+        mqttClient.subscribe(`${baseTopic}/text`, () => {
+            setSaveStatus('saved', 'Synced securely to network');
         });
     });
 
-    mqttClient.on('message', (topic, message) => {
+    mqttClient.on('message', async (topic, message) => {
+        const textTopic = `localshare/room/${roomId}/text`;
+        
+        // Handle persistent text messages
+        if (topic === textTopic) {
+            // message is a Buffer
+            const arrayBuf = new Uint8Array(message);
+            if (arrayBuf.length > 0) {
+                const decryptedText = await decryptText(arrayBuf);
+                if (decryptedText !== null && sharedText.value !== decryptedText) {
+                    isUpdatingFromNetwork = true;
+                    sharedText.value = decryptedText;
+                    isUpdatingFromNetwork = false;
+                    setSaveStatus('saved', 'Synced securely to network');
+                }
+            }
+            return;
+        }
+
+        // Handle signaling messages
         try {
             const data = JSON.parse(message.toString());
             if (data.sender === myPeerId) return; // Ignore own messages
@@ -95,14 +176,35 @@ function setupMQTT() {
 
             handleSignalingMessage(data);
         } catch (e) {
-            console.error('Invalid MQTT message', e);
+            console.error('Invalid MQTT signaling message', e);
         }
     });
 
     mqttClient.on('error', (err) => {
         console.error('MQTT Error:', err);
-        updateStatus('Signaling disconnected', 'error');
+        updateStatus('Network disconnected', 'error');
     });
+}
+
+async function publishText(text) {
+    if (!mqttClient || !mqttClient.connected) return;
+    
+    setSaveStatus('saving', 'Saving securely...');
+    
+    try {
+        const encrypted = await encryptText(text);
+        // Publish with retain: true so latecomers get the text instantly
+        mqttClient.publish(`localshare/room/${roomId}/text`, encrypted, { retain: true, qos: 1 }, (err) => {
+            if (!err) {
+                setSaveStatus('saved', 'Saved securely');
+            } else {
+                setSaveStatus('error', 'Failed to save');
+            }
+        });
+    } catch (e) {
+        console.error("Encryption failed before publishing", e);
+        setSaveStatus('error', 'Encryption failed');
+    }
 }
 
 function broadcastSignaling(payload) {
@@ -118,14 +220,12 @@ function sendSignaling(targetPeerId, payload) {
     mqttClient.publish(`localshare/room/${roomId}`, JSON.stringify(payload));
 }
 
-// --- WebRTC ---
+// --- WebRTC (File Transfers) ---
 
 async function handleSignalingMessage(msg) {
     const sender = msg.sender;
 
     if (msg.type === 'hello') {
-        // New peer joined. I will initiate connection to them.
-        // To avoid both initiating, let the one with higher peerId initiate.
         if (myPeerId > sender) {
             createPeerConnection(sender, true);
         }
@@ -171,9 +271,7 @@ function createPeerConnection(remotePeerId, isInitiator) {
     };
 
     if (isInitiator) {
-        const dc = pc.createDataChannel('localshare', {
-            // Using reliable ordered delivery by default
-        });
+        const dc = pc.createDataChannel('localshare', { });
         setupDataChannel(remotePeerId, dc);
         
         pc.createOffer().then(offer => {
@@ -192,17 +290,11 @@ function createPeerConnection(remotePeerId, isInitiator) {
 
 function setupDataChannel(remotePeerId, dc) {
     peers[remotePeerId].dataChannel = dc;
-    // Necessary for large file transfers (receiving binary data)
     dc.binaryType = 'arraybuffer'; 
 
     dc.onopen = () => {
         console.log(`DataChannel open with ${remotePeerId}`);
         updateConnectionCount();
-        
-        // If we have text, sync it to the new peer
-        if (sharedText.value) {
-            broadcastText(sharedText.value);
-        }
     };
 
     dc.onclose = () => {
@@ -220,13 +312,12 @@ function setupDataChannel(remotePeerId, dc) {
                 console.error("Failed to parse data channel message:", e);
             }
         } else if (event.data instanceof ArrayBuffer) {
-            // It's a file chunk
             handleFileChunk(remotePeerId, event.data);
         }
     };
 }
 
-// --- Data Transfer (Text & Metadata) ---
+// --- Data Transfer (Metadata) ---
 
 function broadcastDataMessage(msgObj) {
     const msgStr = JSON.stringify(msgObj);
@@ -237,17 +328,8 @@ function broadcastDataMessage(msgObj) {
     });
 }
 
-function broadcastText(text) {
-    broadcastDataMessage({ type: 'text', content: text });
-}
-
 function handleDataMessage(sender, msg) {
-    if (msg.type === 'text') {
-        if (sharedText.value !== msg.content) {
-            sharedText.value = msg.content;
-        }
-    } else if (msg.type === 'file-start') {
-        // Initialize file receiving
+    if (msg.type === 'file-start') {
         receiveBuffers[msg.fileId] = {
             metadata: msg.metadata,
             chunks: [],
@@ -255,12 +337,11 @@ function handleDataMessage(sender, msg) {
             uiElement: createTransferUI(msg.metadata.name, msg.metadata.size, 'receiving')
         };
     } else if (msg.type === 'file-end') {
-        // Finish file receiving
         finishFileReceive(msg.fileId);
     }
 }
 
-// --- File Transfer (Binary) ---
+// --- File Transfer (Binary over WebRTC) ---
 
 async function sendFiles(files) {
     for (const file of files) {
@@ -270,14 +351,13 @@ async function sendFiles(files) {
 
 async function sendSingleFile(file) {
     if (Object.keys(peers).length === 0) {
-        alert("No devices connected yet.");
+        alert("Both devices must be online simultaneously for file transfers. No peers connected.");
         return;
     }
 
     const fileId = generateId();
     const metadata = { name: file.name, size: file.size, type: file.type };
     
-    // Broadcast file start
     broadcastDataMessage({ type: 'file-start', fileId, metadata });
     
     const uiElement = createTransferUI(file.name, file.size, 'sending');
@@ -287,7 +367,6 @@ async function sendSingleFile(file) {
     let offset = 0;
     const startTime = Date.now();
 
-    // Determine how many connected peers
     const activeChannels = Object.values(peers)
         .map(p => p.dataChannel)
         .filter(dc => dc && dc.readyState === 'open');
@@ -297,20 +376,15 @@ async function sendSingleFile(file) {
     return new Promise((resolve) => {
         function sendNextChunk() {
             while (offset < arrayBuffer.byteLength) {
-                // Check if any channel's buffered amount is too high (backpressure)
                 const isBufferFull = activeChannels.some(dc => dc.bufferedAmount > CHUNK_SIZE * 4);
                 
                 if (isBufferFull) {
-                    // Wait for the buffer to drain a bit
-                    // Setting a small timeout to let the event loop process data
                     setTimeout(sendNextChunk, 10);
                     return;
                 }
 
                 const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
                 
-                // Prepend fileId to the chunk so receiver knows which file it belongs to
-                // We use a simple protocol: first 8 bytes (string chars) are fileId, then binary data
                 const fileIdBytes = new TextEncoder().encode(fileId.padEnd(8, ' '));
                 const combined = new Uint8Array(fileIdBytes.byteLength + chunk.byteLength);
                 combined.set(fileIdBytes, 0);
@@ -322,11 +396,9 @@ async function sendSingleFile(file) {
 
                 offset += chunk.byteLength;
                 
-                // Update UI progress
                 const percent = (offset / arrayBuffer.byteLength) * 100;
                 progressBar.style.width = `${percent}%`;
 
-                // Calculate speed
                 const elapsedSeconds = (Date.now() - startTime) / 1000;
                 if (elapsedSeconds > 0) {
                     const speed = formatBytes(offset / elapsedSeconds) + '/s';
@@ -334,7 +406,6 @@ async function sendSingleFile(file) {
                 }
             }
 
-            // Finished reading
             progressBar.style.width = '100%';
             uiElement.classList.add('done');
             uiElement.querySelector('.speed').textContent = 'Completed';
@@ -347,7 +418,6 @@ async function sendSingleFile(file) {
 }
 
 function handleFileChunk(sender, buffer) {
-    // Extract fileId (first 8 bytes)
     const fileIdBytes = buffer.slice(0, 8);
     const fileId = new TextDecoder().decode(fileIdBytes).trim();
     const chunkData = buffer.slice(8);
@@ -357,7 +427,6 @@ function handleFileChunk(sender, buffer) {
         receiving.chunks.push(chunkData);
         receiving.receivedBytes += chunkData.byteLength;
         
-        // Update UI
         const percent = (receiving.receivedBytes / receiving.metadata.size) * 100;
         receiving.uiElement.querySelector('.progress-bar').style.width = `${percent}%`;
     }
@@ -366,11 +435,9 @@ function handleFileChunk(sender, buffer) {
 function finishFileReceive(fileId) {
     const receiving = receiveBuffers[fileId];
     if (receiving) {
-        // Reassemble blob
         const blob = new Blob(receiving.chunks, { type: receiving.metadata.type });
         const url = URL.createObjectURL(blob);
         
-        // Automatically download or provide link
         const a = document.createElement('a');
         a.href = url;
         a.download = receiving.metadata.name;
@@ -378,10 +445,8 @@ function finishFileReceive(fileId) {
         a.click();
         document.body.removeChild(a);
 
-        // Clean up memory
         receiving.chunks = [];
         
-        // Update UI
         receiving.uiElement.classList.add('done');
         receiving.uiElement.querySelector('.speed').textContent = 'Downloaded';
         receiving.uiElement.querySelector('.progress-bar').style.width = '100%';
@@ -392,7 +457,15 @@ function finishFileReceive(fileId) {
 // --- UI Events ---
 
 sharedText.addEventListener('input', () => {
-    broadcastText(sharedText.value);
+    if (isUpdatingFromNetwork) return; // Prevent loop
+    
+    setSaveStatus('saving', 'Saving...');
+    
+    // Debounce publishing to MQTT to avoid spamming the network
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+        publishText(sharedText.value);
+    }, 500); // Wait 500ms after last keystroke
 });
 
 copyBtn.addEventListener('click', () => {
