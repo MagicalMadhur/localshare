@@ -5,7 +5,10 @@ const STUN_SERVERS = {
         { urls: 'stun:stun1.l.google.com:19302' }
     ]
 };
-const MQTT_BROKER = 'wss://test.mosquitto.org:8081'; // Public WebSocket MQTT broker
+const MQTT_BROKERS = [
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt'
+];
 const CHUNK_SIZE = 64 * 1024; // 64 KB for WebRTC DataChannel
 
 // State
@@ -13,6 +16,9 @@ let myPeerId = generateId();
 let roomId = null;
 let cryptoKey = null;
 let mqttClient = null;
+let currentBrokerIndex = 0;
+let connectionTimer = null;
+let isConnected = false;
 let peers = {}; // mapping peerId -> { pc, dataChannel }
 let receiveBuffers = {}; // file transfer buffers
 let typingTimeout = null;
@@ -43,7 +49,7 @@ async function init() {
         cryptoKey = await deriveKey(ip);
         
         updateStatus('Connecting to network...', 'connecting');
-        setupMQTT();
+        setupMQTT(0);
     } catch (err) {
         console.error('Init error:', err);
         updateStatus('Initialization failed', 'error');
@@ -51,9 +57,16 @@ async function init() {
 }
 
 async function getPublicIP() {
-    const res = await fetch('https://api.ipify.org?format=json');
-    const data = await res.json();
-    return data.ip;
+    try {
+        const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(4000) });
+        const data = await res.json();
+        return data.ip;
+    } catch (e) {
+        console.warn('Primary IP service failed, trying fallback...', e);
+        const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(4000) });
+        const text = await res.text();
+        return text.trim();
+    }
 }
 
 async function hashString(str) {
@@ -126,16 +139,54 @@ function updateConnectionCount() {
     if (count > 0) {
         updateStatus(`Files: Ready | Connected to ${count} device(s)`, 'connected');
     } else {
-        updateStatus('Files: Waiting for peer | Text: Synced to network', 'connecting');
+        updateStatus('Connected to network', 'connected');
     }
 }
 
 // --- Signaling & PubSub (MQTT) ---
 
-function setupMQTT() {
-    mqttClient = mqtt.connect(MQTT_BROKER);
+function setupMQTT(brokerIndex = 0) {
+    if (mqttClient) {
+        try {
+            mqttClient.removeAllListeners();
+            mqttClient.end(true);
+        } catch (e) {}
+        mqttClient = null;
+    }
+
+    isConnected = false;
+    currentBrokerIndex = brokerIndex % MQTT_BROKERS.length;
+    const currentBroker = MQTT_BROKERS[currentBrokerIndex];
+    console.log(`Connecting to MQTT broker: ${currentBroker}`);
+    updateStatus('Connecting to network...', 'connecting');
+
+    if (connectionTimer) clearTimeout(connectionTimer);
+
+    // If broker connection hangs or fails to connect in 6 seconds, switch to next broker
+    connectionTimer = setTimeout(() => {
+        if (!isConnected) {
+            console.warn(`Connection to ${currentBroker} timed out, switching to fallback broker...`);
+            setupMQTT(currentBrokerIndex + 1);
+        }
+    }, 6000);
+
+    try {
+        mqttClient = mqtt.connect(currentBroker, {
+            connectTimeout: 5000,
+            reconnectPeriod: 4000,
+            clientId: 'localshare_' + myPeerId + '_' + Math.random().toString(16).substring(2, 6)
+        });
+    } catch (err) {
+        console.error('MQTT connect error:', err);
+        setupMQTT(currentBrokerIndex + 1);
+        return;
+    }
 
     mqttClient.on('connect', () => {
+        isConnected = true;
+        if (connectionTimer) clearTimeout(connectionTimer);
+        console.log(`Connected to broker: ${currentBroker}`);
+        
         const baseTopic = `localshare/room/${roomId}`;
         
         // Subscribe to signaling and text updates
@@ -178,10 +229,6 @@ function setupMQTT() {
                             sharedText.value = '';
                             isUpdatingFromNetwork = false;
                         }
-                        // Only publish clear message if we are the one discovering it's expired
-                        // to prevent an infinite loop, check if we actually cleared it locally.
-                        // But actually, just calling publishText('') is fine, the debounce will handle it, or we just do it manually.
-                        // Actually, it's safer to just set the value to empty and let the user overwrite it, or explicitly publish an empty text.
                         publishText('');
                         setSaveStatus('saved', 'Expired data cleared');
                     } else {
@@ -211,7 +258,23 @@ function setupMQTT() {
 
     mqttClient.on('error', (err) => {
         console.error('MQTT Error:', err);
-        updateStatus('Network disconnected', 'error');
+        if (!isConnected) {
+            if (connectionTimer) clearTimeout(connectionTimer);
+            setupMQTT(currentBrokerIndex + 1);
+        } else {
+            updateStatus('Reconnecting...', 'connecting');
+        }
+    });
+
+    mqttClient.on('close', () => {
+        if (!isConnected) {
+            if (connectionTimer) clearTimeout(connectionTimer);
+            setTimeout(() => {
+                if (!isConnected) {
+                    setupMQTT(currentBrokerIndex + 1);
+                }
+            }, 1000);
+        }
     });
 }
 
