@@ -10,11 +10,13 @@
     <meta name="theme-color" content="#0f172a">
     <link rel="apple-touch-icon" href="icon.svg">
     
-    <link rel="stylesheet" href="style.css?v=5">
+    <link rel="stylesheet" href="style.css?v=6">
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- MQTT.js for signaling -->
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <!-- JSZip for browser-side client zip archiving -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
     <div class="background-blobs">
@@ -111,7 +113,7 @@
         <button id="undoToastBtn" class="btn-undo">Undo</button>
     </div>
 
-    <script src="app.js?v=5"></script>
+    <script src="app.js?v=6"></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

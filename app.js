@@ -652,14 +652,13 @@ async function handleIncomingFiles(files) {
     }
 }
 
-function uploadToFilebin(file, onProgress) {
+function uploadToStoCare(file, onProgress) {
     return new Promise((resolve, reject) => {
-        const binId = 'ls-' + roomId;
-        const uploadUrl = `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`;
-        const rawBlob = file.slice(0, file.size, '');
+        const fd = new FormData();
+        fd.append('file', file);
 
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', uploadUrl);
+        xhr.open('POST', 'https://ul.sto.care');
         xhr.upload.onprogress = e => {
             if (e.lengthComputable && onProgress) {
                 const percent = Math.round((e.loaded / e.total) * 100);
@@ -667,19 +666,24 @@ function uploadToFilebin(file, onProgress) {
             }
         };
         xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                resolve({
-                    url: `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`,
-                    provider: 'filebin'
-                });
-            } else {
-                reject(new Error('Filebin returned HTTP ' + xhr.status));
+            if (xhr.status === 200) {
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    if (data && data.url) {
+                        resolve({
+                            url: data.url,
+                            provider: 'stocare'
+                        });
+                        return;
+                    }
+                } catch (e) {}
             }
+            reject(new Error('StoCare returned HTTP ' + xhr.status));
         };
-        xhr.onerror = () => reject(new Error('Filebin network error'));
-        xhr.ontimeout = () => reject(new Error('Filebin timeout'));
+        xhr.onerror = () => reject(new Error('StoCare network error'));
+        xhr.ontimeout = () => reject(new Error('StoCare timeout'));
         xhr.timeout = 60000;
-        xhr.send(rawBlob);
+        xhr.send(fd);
     });
 }
 
@@ -726,7 +730,7 @@ async function uploadCloudFile(file) {
     const progressBar = uploadEl ? uploadEl.querySelector('.progress-bar') : null;
     const speedText = uploadEl ? uploadEl.querySelector('.speed') : null;
 
-    const updateProgress = (pct, label = '7-day cloud') => {
+    const updateProgress = (pct, label = 'Cloudflare edge') => {
         if (progressBar) progressBar.style.width = `${pct}%`;
         if (speedText) speedText.textContent = `Uploading to ${label}... ${pct}%`;
     };
@@ -734,10 +738,10 @@ async function uploadCloudFile(file) {
     try {
         let result = null;
         try {
-            updateProgress(10, '7-day cloud');
-            result = await uploadToFilebin(file, pct => updateProgress(pct, '7-day cloud'));
-        } catch (fbErr) {
-            console.warn('Filebin primary upload failed, trying backup cloud provider...', fbErr);
+            updateProgress(10, 'Cloudflare edge');
+            result = await uploadToStoCare(file, pct => updateProgress(pct, 'Cloudflare edge'));
+        } catch (scErr) {
+            console.warn('StoCare upload failed, trying backup cloud provider...', scErr);
             updateProgress(10, 'backup cloud');
             result = await uploadToTmpfiles(file, pct => updateProgress(pct, 'backup cloud'));
         }
@@ -773,24 +777,68 @@ function downloadFile(fileId) {
     const a = document.createElement('a');
     a.href = file.url;
     a.download = file.name;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
 }
 
-function downloadAllZip() {
-    const binId = 'ls-' + roomId;
-    window.open(`https://filebin.net/archive/${binId}/zip`, '_blank');
+async function downloadAllZip() {
+    if (!filesCatalog || filesCatalog.length === 0) return;
+
+    if (typeof JSZip !== 'undefined') {
+        const originalText = downloadAllBtn ? downloadAllBtn.innerHTML : '';
+        if (downloadAllBtn) {
+            downloadAllBtn.disabled = true;
+            downloadAllBtn.textContent = 'Preparing .zip...';
+        }
+
+        try {
+            const zip = new JSZip();
+            for (let i = 0; i < filesCatalog.length; i++) {
+                const file = filesCatalog[i];
+                if (downloadAllBtn) downloadAllBtn.textContent = `Fetching (${i + 1}/${filesCatalog.length})...`;
+                try {
+                    const res = await fetch(file.url);
+                    const blob = await res.blob();
+                    zip.file(file.name, blob);
+                } catch (e) {
+                    console.warn('Failed to fetch file for zip:', file.name, e);
+                }
+            }
+
+            if (downloadAllBtn) downloadAllBtn.textContent = 'Generating .zip...';
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            const zipUrl = URL.createObjectURL(zipBlob);
+            const a = document.createElement('a');
+            a.href = zipUrl;
+            a.download = `LocalShare-files-${new Date().toISOString().slice(0, 10)}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(zipUrl), 30000);
+        } catch (err) {
+            console.error('Client zip error:', err);
+            for (const file of filesCatalog) {
+                downloadFile(file.id);
+                await new Promise(r => setTimeout(r, 400));
+            }
+        } finally {
+            if (downloadAllBtn) {
+                downloadAllBtn.disabled = false;
+                downloadAllBtn.innerHTML = originalText;
+            }
+        }
+    } else {
+        for (const file of filesCatalog) {
+            downloadFile(file.id);
+            await new Promise(r => setTimeout(r, 400));
+        }
+    }
 }
 
 async function deleteCloudFile(fileId) {
     const file = filesCatalog.find(f => f.id === fileId);
     if (!file) return;
-
-    const binId = 'ls-' + roomId;
-    const deleteUrl = `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`;
 
     // Stash for undo
     lastDeletedFile = file;
@@ -810,26 +858,14 @@ async function deleteCloudFile(fileId) {
     });
 
     if (undoTimer) clearTimeout(undoTimer);
-    undoTimer = setTimeout(async () => {
-        if (lastDeletedFile && lastDeletedFile.id === fileId) {
-            try {
-                await fetch(deleteUrl, { method: 'DELETE' });
-            } catch (e) {
-                console.warn('Filebin delete error:', e);
-            }
-            lastDeletedFile = null;
-        }
+    undoTimer = setTimeout(() => {
+        lastDeletedFile = null;
     }, 5500);
 }
 
 async function deleteAllCloudFiles() {
     if (filesCatalog.length === 0) return;
     if (!confirm('Are you sure you want to delete all shared files?')) return;
-
-    const binId = 'ls-' + roomId;
-    try {
-        await fetch(`https://filebin.net/${binId}`, { method: 'DELETE' });
-    } catch (e) {}
 
     filesCatalog = [];
     publishFilesCatalog();
