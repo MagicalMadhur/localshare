@@ -652,31 +652,103 @@ async function handleIncomingFiles(files) {
     }
 }
 
+function uploadToFilebin(file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const binId = 'ls-' + roomId;
+        const uploadUrl = `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`;
+        const rawBlob = file.slice(0, file.size, '');
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', uploadUrl);
+        xhr.upload.onprogress = e => {
+            if (e.lengthComputable && onProgress) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                onProgress(percent);
+            }
+        };
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve({
+                    url: `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`,
+                    provider: 'filebin'
+                });
+            } else {
+                reject(new Error('Filebin returned HTTP ' + xhr.status));
+            }
+        };
+        xhr.onerror = () => reject(new Error('Filebin network error'));
+        xhr.ontimeout = () => reject(new Error('Filebin timeout'));
+        xhr.timeout = 60000;
+        xhr.send(rawBlob);
+    });
+}
+
+function uploadToTmpfiles(file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const fd = new FormData();
+        fd.append('file', file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'https://tmpfiles.org/api/v1/upload');
+        xhr.upload.onprogress = e => {
+            if (e.lengthComputable && onProgress) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                onProgress(percent);
+            }
+        };
+        xhr.onload = () => {
+            if (xhr.status === 200) {
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    if (data.status === 'success' && data.data && data.data.url) {
+                        const rawUrl = data.data.url;
+                        const dlUrl = rawUrl.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+                        resolve({
+                            url: dlUrl,
+                            provider: 'tmpfiles'
+                        });
+                        return;
+                    }
+                } catch (e) {}
+            }
+            reject(new Error('Tmpfiles returned HTTP ' + xhr.status));
+        };
+        xhr.onerror = () => reject(new Error('Tmpfiles network error'));
+        xhr.ontimeout = () => reject(new Error('Tmpfiles timeout'));
+        xhr.timeout = 60000;
+        xhr.send(fd);
+    });
+}
+
 async function uploadCloudFile(file) {
-    const binId = 'ls-' + roomId;
-    const uploadUrl = `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`;
     const uploadId = 'up_' + generateId();
-    
     const uploadEl = createActiveUploadUI(uploadId, file.name, file.size);
+    const progressBar = uploadEl ? uploadEl.querySelector('.progress-bar') : null;
+    const speedText = uploadEl ? uploadEl.querySelector('.speed') : null;
+
+    const updateProgress = (pct, label = '7-day cloud') => {
+        if (progressBar) progressBar.style.width = `${pct}%`;
+        if (speedText) speedText.textContent = `Uploading to ${label}... ${pct}%`;
+    };
 
     try {
-        const res = await fetch(uploadUrl, {
-            method: 'POST',
-            body: file,
-            headers: {
-                'Content-Type': file.type || 'application/octet-stream'
-            }
-        });
+        let result = null;
+        try {
+            updateProgress(10, '7-day cloud');
+            result = await uploadToFilebin(file, pct => updateProgress(pct, '7-day cloud'));
+        } catch (fbErr) {
+            console.warn('Filebin primary upload failed, trying backup cloud provider...', fbErr);
+            updateProgress(10, 'backup cloud');
+            result = await uploadToTmpfiles(file, pct => updateProgress(pct, 'backup cloud'));
+        }
 
-        if (!res.ok) throw new Error('Upload returned ' + res.status);
-
-        const data = await res.json();
         const fileObj = {
             id: generateId(),
             name: file.name,
             size: file.size,
             type: file.type || 'application/octet-stream',
-            url: `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`,
+            url: result.url,
+            provider: result.provider,
             timestamp: Date.now()
         };
 
@@ -688,7 +760,7 @@ async function uploadCloudFile(file) {
         publishFilesCatalog();
         renderFilesList();
     } catch (err) {
-        console.error('Filebin upload error:', err);
+        console.error('All cloud upload providers failed:', err);
         if (uploadEl) uploadEl.remove();
         alert(`Cloud upload for "${file.name}" encountered an issue. Falling back to direct P2P transfer.`);
         sendSingleFile(file);
@@ -698,7 +770,14 @@ async function uploadCloudFile(file) {
 function downloadFile(fileId) {
     const file = filesCatalog.find(f => f.id === fileId);
     if (!file) return;
-    window.open(file.url, '_blank');
+    const a = document.createElement('a');
+    a.href = file.url;
+    a.download = file.name;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 function downloadAllZip() {
