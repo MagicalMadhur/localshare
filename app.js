@@ -23,6 +23,10 @@ let peers = {}; // mapping peerId -> { pc, dataChannel }
 let receiveBuffers = {}; // file transfer buffers
 let typingTimeout = null;
 let isUpdatingFromNetwork = false;
+let filesCatalog = []; // Shared 7-day files
+let lastDeletedFile = null;
+let undoTimer = null;
+let toastTimeout = null;
 
 // UI Elements
 const statusDot = document.querySelector('.status-dot');
@@ -36,6 +40,17 @@ const copyToast = document.getElementById('copyToast');
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const transfersContainer = document.getElementById('transfersContainer');
+const filesListContainer = document.getElementById('filesListContainer');
+const emptyFilesMsg = document.getElementById('emptyFilesMsg');
+const catalogSummary = document.getElementById('catalogSummary');
+const catalogCount = document.getElementById('catalogCount');
+const catalogTotalSize = document.getElementById('catalogTotalSize');
+const downloadAllBtn = document.getElementById('downloadAllBtn');
+const deleteAllBtn = document.getElementById('deleteAllBtn');
+const activeUploadsContainer = document.getElementById('activeUploadsContainer');
+const undoToast = document.getElementById('undoToast');
+const undoToastMsg = document.getElementById('undoToastMsg');
+const undoToastBtn = document.getElementById('undoToastBtn');
 
 // --- Initialization ---
 
@@ -199,11 +214,41 @@ function setupMQTT(brokerIndex = 0) {
         mqttClient.subscribe(`${baseTopic}/text`, () => {
             setSaveStatus('saved', 'Synced securely to network');
         });
+
+        // Subscribe to 7-day files catalog persistence topic
+        mqttClient.subscribe(`${baseTopic}/files`, () => {
+            console.log('Subscribed to files catalog topic');
+        });
     });
 
     mqttClient.on('message', async (topic, message) => {
         const textTopic = `localshare/room/${roomId}/text`;
+        const filesTopic = `localshare/room/${roomId}/files`;
         
+        // Handle persistent 7-day files catalog messages
+        if (topic === filesTopic) {
+            const arrayBuf = new Uint8Array(message);
+            if (arrayBuf.length > 0) {
+                const decryptedPayload = await decryptText(arrayBuf);
+                if (decryptedPayload !== null) {
+                    try {
+                        const data = JSON.parse(decryptedPayload);
+                        const list = Array.isArray(data.files) ? data.files : [];
+                        const sevenDaysInMs = 7 * 24 * 60 * 60 * 1000;
+                        const now = Date.now();
+                        filesCatalog = list.filter(f => (now - f.timestamp) <= sevenDaysInMs);
+                        renderFilesList();
+                    } catch (e) {
+                        console.error('Failed to parse files catalog payload', e);
+                    }
+                }
+            } else {
+                filesCatalog = [];
+                renderFilesList();
+            }
+            return;
+        }
+
         // Handle persistent text messages
         if (topic === textTopic) {
             // message is a Buffer
@@ -577,6 +622,281 @@ clearBtn.addEventListener('click', () => {
     publishText('');
 });
 
+// --- 7-Day Cloud File Sharing (Filebin Anonymous Backend) ---
+
+async function publishFilesCatalog() {
+    if (!mqttClient || !mqttClient.connected) return;
+    try {
+        const payload = JSON.stringify({
+            files: filesCatalog,
+            timestamp: Date.now()
+        });
+        const encrypted = await encryptText(payload);
+        mqttClient.publish(`localshare/room/${roomId}/files`, encrypted, { retain: true, qos: 1 });
+    } catch (e) {
+        console.error('Failed to publish files catalog', e);
+    }
+}
+
+async function handleIncomingFiles(files) {
+    if (!files || files.length === 0) return;
+    for (const file of files) {
+        if (file.size > 100 * 1024 * 1024) {
+            // Over 100 MB: use direct P2P transfer
+            alert(`"${file.name}" is ${formatBytes(file.size)} (> 100 MB).\nSending directly via live P2P (requires both devices to be online).`);
+            sendSingleFile(file);
+        } else {
+            // 100 MB or under: upload to 7-day cloud storage
+            await uploadCloudFile(file);
+        }
+    }
+}
+
+async function uploadCloudFile(file) {
+    const binId = 'ls-' + roomId;
+    const uploadUrl = `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`;
+    const uploadId = 'up_' + generateId();
+    
+    const uploadEl = createActiveUploadUI(uploadId, file.name, file.size);
+
+    try {
+        const res = await fetch(uploadUrl, {
+            method: 'POST',
+            body: file,
+            headers: {
+                'Content-Type': file.type || 'application/octet-stream'
+            }
+        });
+
+        if (!res.ok) throw new Error('Upload returned ' + res.status);
+
+        const data = await res.json();
+        const fileObj = {
+            id: generateId(),
+            name: file.name,
+            size: file.size,
+            type: file.type || 'application/octet-stream',
+            url: `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`,
+            timestamp: Date.now()
+        };
+
+        if (uploadEl) uploadEl.remove();
+
+        // Update local catalog and broadcast
+        filesCatalog = filesCatalog.filter(f => f.name !== file.name);
+        filesCatalog.unshift(fileObj);
+        publishFilesCatalog();
+        renderFilesList();
+    } catch (err) {
+        console.error('Filebin upload error:', err);
+        if (uploadEl) uploadEl.remove();
+        alert(`Cloud upload for "${file.name}" encountered an issue. Falling back to direct P2P transfer.`);
+        sendSingleFile(file);
+    }
+}
+
+function downloadFile(fileId) {
+    const file = filesCatalog.find(f => f.id === fileId);
+    if (!file) return;
+    window.open(file.url, '_blank');
+}
+
+function downloadAllZip() {
+    const binId = 'ls-' + roomId;
+    window.open(`https://filebin.net/archive/${binId}/zip`, '_blank');
+}
+
+async function deleteCloudFile(fileId) {
+    const file = filesCatalog.find(f => f.id === fileId);
+    if (!file) return;
+
+    const binId = 'ls-' + roomId;
+    const deleteUrl = `https://filebin.net/${binId}/${encodeURIComponent(file.name)}`;
+
+    // Stash for undo
+    lastDeletedFile = file;
+    filesCatalog = filesCatalog.filter(f => f.id !== fileId);
+    publishFilesCatalog();
+    renderFilesList();
+
+    // Show undo toast
+    showUndoToast(file.name, async () => {
+        // User clicked Undo
+        if (lastDeletedFile) {
+            filesCatalog.unshift(lastDeletedFile);
+            lastDeletedFile = null;
+            publishFilesCatalog();
+            renderFilesList();
+        }
+    });
+
+    if (undoTimer) clearTimeout(undoTimer);
+    undoTimer = setTimeout(async () => {
+        if (lastDeletedFile && lastDeletedFile.id === fileId) {
+            try {
+                await fetch(deleteUrl, { method: 'DELETE' });
+            } catch (e) {
+                console.warn('Filebin delete error:', e);
+            }
+            lastDeletedFile = null;
+        }
+    }, 5500);
+}
+
+async function deleteAllCloudFiles() {
+    if (filesCatalog.length === 0) return;
+    if (!confirm('Are you sure you want to delete all shared files?')) return;
+
+    const binId = 'ls-' + roomId;
+    try {
+        await fetch(`https://filebin.net/${binId}`, { method: 'DELETE' });
+    } catch (e) {}
+
+    filesCatalog = [];
+    publishFilesCatalog();
+    renderFilesList();
+}
+
+function showUndoToast(fileName, onUndo) {
+    if (!undoToast) return;
+    undoToastMsg.textContent = `${fileName} deleted`;
+    undoToast.classList.remove('hidden');
+
+    const handleUndo = () => {
+        undoToast.classList.add('hidden');
+        undoToastBtn.removeEventListener('click', handleUndo);
+        if (toastTimeout) clearTimeout(toastTimeout);
+        onUndo();
+    };
+
+    undoToastBtn.onclick = handleUndo;
+
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => {
+        undoToast.classList.add('hidden');
+        undoToastBtn.onclick = null;
+    }, 5000);
+}
+
+function renderFilesList() {
+    if (!filesListContainer) return;
+
+    const totalCount = filesCatalog.length;
+    if (totalCount === 0) {
+        if (emptyFilesMsg) emptyFilesMsg.classList.remove('hidden');
+        if (catalogSummary) catalogSummary.classList.add('hidden');
+        if (downloadAllBtn) downloadAllBtn.classList.add('hidden');
+        if (deleteAllBtn) deleteAllBtn.classList.add('hidden');
+        filesListContainer.innerHTML = '';
+        if (emptyFilesMsg) filesListContainer.appendChild(emptyFilesMsg);
+        return;
+    }
+
+    if (emptyFilesMsg) emptyFilesMsg.classList.add('hidden');
+    if (catalogSummary) catalogSummary.classList.remove('hidden');
+    if (downloadAllBtn) downloadAllBtn.classList.remove('hidden');
+    if (deleteAllBtn) deleteAllBtn.classList.remove('hidden');
+
+    const totalBytes = filesCatalog.reduce((sum, f) => sum + (f.size || 0), 0);
+    catalogCount.textContent = `Your files ${totalCount}`;
+    catalogTotalSize.textContent = formatBytes(totalBytes);
+
+    filesListContainer.innerHTML = '';
+
+    filesCatalog.forEach(file => {
+        const card = document.createElement('div');
+        card.className = 'file-card';
+        card.dataset.id = file.id;
+
+        const { category, label } = getFileCategory(file.name, file.type);
+
+        card.innerHTML = `
+            <div class="file-card-main">
+                <div class="file-icon-box ${category}">${label}</div>
+                <div class="file-details">
+                    <div class="file-title" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+                    <div class="file-submeta">
+                        <span>${formatBytes(file.size)}</span>
+                        <span>•</span>
+                        <span>${timeAgo(file.timestamp)}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="file-actions">
+                <button class="file-action-btn download" title="Download">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </button>
+                <button class="file-action-btn delete" title="Delete">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                </button>
+            </div>
+        `;
+
+        card.querySelector('.download').onclick = () => downloadFile(file.id);
+        card.querySelector('.delete').onclick = () => deleteCloudFile(file.id);
+
+        filesListContainer.appendChild(card);
+    });
+}
+
+function getFileCategory(filename, mimeType = '') {
+    const ext = filename.split('.').pop().toLowerCase();
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext) || mimeType.startsWith('image/')) {
+        return { category: 'image', label: ext.substring(0, 3).toUpperCase() || 'IMG' };
+    }
+    if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
+        return { category: 'archive', label: 'ZIP' };
+    }
+    if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'mp3', 'wav', 'ogg', 'm4a'].includes(ext) || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
+        return { category: 'media', label: ext.substring(0, 3).toUpperCase() || 'MED' };
+    }
+    if (['pdf', 'doc', 'docx', 'txt', 'rtf', 'xlsx', 'csv', 'pptx'].includes(ext)) {
+        return { category: 'document', label: ext.substring(0, 3).toUpperCase() || 'DOC' };
+    }
+    return { category: 'default', label: ext.substring(0, 3).toUpperCase() || 'FILE' };
+}
+
+function timeAgo(timestamp) {
+    if (!timestamp) return 'just now';
+    const elapsed = Date.now() - timestamp;
+    const sec = Math.floor(elapsed / 1000);
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const days = Math.floor(hr / 24);
+    return `${days}d ago`;
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function createActiveUploadUI(id, name, size) {
+    const el = document.createElement('div');
+    el.id = id;
+    el.className = 'transfer-item';
+    el.innerHTML = `
+        <div class="transfer-info">
+            <div class="file-name" title="${escapeHtml(name)}">
+                ☁ Uploading: ${escapeHtml(name)}
+            </div>
+            <div class="file-meta">
+                <span>${formatBytes(size)}</span>
+                <span class="speed">Saving to cloud (7 days)...</span>
+            </div>
+        </div>
+        <div class="progress-bar-container">
+            <div class="progress-bar" style="width: 75%; animation: pulse 1s infinite alternate;"></div>
+        </div>
+    `;
+    activeUploadsContainer.prepend(el);
+    return el;
+}
+
 dropZone.addEventListener('dragover', e => {
     e.preventDefault();
     dropZone.classList.add('dragover');
@@ -590,15 +910,31 @@ dropZone.addEventListener('drop', e => {
     e.preventDefault();
     dropZone.classList.remove('dragover');
     if (e.dataTransfer.files.length) {
-        sendFiles(e.dataTransfer.files);
+        handleIncomingFiles(Array.from(e.dataTransfer.files));
     }
 });
 
 fileInput.addEventListener('change', e => {
     if (fileInput.files.length) {
-        sendFiles(fileInput.files);
+        handleIncomingFiles(Array.from(fileInput.files));
+        fileInput.value = '';
     }
 });
+
+window.addEventListener('paste', e => {
+    if (document.activeElement === sharedText) return;
+    if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+        e.preventDefault();
+        handleIncomingFiles(Array.from(e.clipboardData.files));
+    }
+});
+
+if (downloadAllBtn) {
+    downloadAllBtn.addEventListener('click', downloadAllZip);
+}
+if (deleteAllBtn) {
+    deleteAllBtn.addEventListener('click', deleteAllCloudFiles);
+}
 
 function createTransferUI(name, size, type = 'sending') {
     const el = document.createElement('div');

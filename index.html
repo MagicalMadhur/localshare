@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#0f172a">
     <link rel="apple-touch-icon" href="icon.svg">
     
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=4">
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- MQTT.js for signaling -->
@@ -53,30 +53,65 @@
             </section>
 
             <section class="card file-sharing">
-                <div class="card-header">
-                    <h2>File Sharing</h2>
-                    <span class="subtitle">Direct P2P transfer (Both devices must be online)</span>
+                <div class="card-header file-header">
+                    <div>
+                        <h2>Shared Files</h2>
+                        <span class="subtitle">Auto-deleted after 7 days · Offline download for any device on this network</span>
+                    </div>
+                    <div class="file-header-actions">
+                        <button id="downloadAllBtn" class="btn secondary sm hidden">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                            Download all (.zip)
+                        </button>
+                        <button id="deleteAllBtn" class="btn danger sm hidden" style="background: var(--danger); color: white;">
+                            Delete all
+                        </button>
+                    </div>
                 </div>
+
                 <div class="drop-zone" id="dropZone">
-                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-                    <p>Drag & Drop files here</p>
-                    <span>or</span>
-                    <label for="fileInput" class="btn primary">Browse Files</label>
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                    <p>Drag & Drop files here or <label for="fileInput" class="browse-link">Browse</label></p>
+                    <span class="drop-zone-meta">Up to 100 MB · Auto-deleted after 7 days · <kbd>Ctrl+V</kbd> to paste</span>
                     <input type="file" id="fileInput" multiple hidden>
                 </div>
 
-                <div class="transfers" id="transfersContainer">
-                    <!-- Transfer items will appear here -->
+                <!-- Active Uploads Progress -->
+                <div class="active-uploads" id="activeUploadsContainer"></div>
+
+                <!-- Shared Files List (Simple.Savr Style) -->
+                <div class="files-catalog" id="filesCatalogSection">
+                    <div class="catalog-summary hidden" id="catalogSummary">
+                        <span id="catalogCount">Your files 0</span>
+                        <span class="dot-separator">•</span>
+                        <span id="catalogTotalSize">0 KB</span>
+                        <span class="dot-separator">•</span>
+                        <span class="expiry-badge">Auto-deleted after 7 days</span>
+                    </div>
+                    <div class="files-list" id="filesListContainer">
+                        <div class="empty-files-placeholder" id="emptyFilesMsg">
+                            No files uploaded yet. Files you upload will stay available for 7 days for any device on this network.
+                        </div>
+                    </div>
                 </div>
+
+                <!-- P2P Live Direct Transfers (>100MB) -->
+                <div class="transfers" id="transfersContainer"></div>
             </section>
         </main>
         
         <footer>
-            <p>Your data never leaves your devices. Transferred securely via WebRTC.</p>
+            <p>Your data stays on your network. Persistent files expire automatically in 7 days.</p>
         </footer>
     </div>
 
-    <script src="app.js?v=3"></script>
+    <!-- Floating Undo Toast (Simple.Savr Style) -->
+    <div id="undoToast" class="undo-toast hidden">
+        <span id="undoToastMsg">file.jpg deleted</span>
+        <button id="undoToastBtn" class="btn-undo">Undo</button>
+    </div>
+
+    <script src="app.js?v=4"></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
