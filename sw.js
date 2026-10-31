@@ -1,9 +1,9 @@
-const CACHE_NAME = 'localshare-v6';
+const CACHE_NAME = 'localshare-v7';
 const ASSETS = [
     './',
     './index.html',
-    './style.css?v=6',
-    './app.js?v=6',
+    './style.css?v=7',
+    './app.js?v=7',
     './manifest.json',
     './icon.svg'
 ];
@@ -30,6 +30,17 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
+    // Only handle GET requests originating from our own domain.
+    // Non-GET requests (POST uploads, etc.) or cross-origin requests must bypass
+    // the Service Worker so browser XMLHttpRequest/fetch streams upload progress in real-time.
+    if (e.request.method !== 'GET') return;
+    try {
+        const url = new URL(e.request.url);
+        if (url.origin !== self.location.origin) return;
+    } catch (err) {
+        return;
+    }
+
     e.respondWith(
         fetch(e.request)
             .then((response) => {
@@ -42,4 +53,3 @@ self.addEventListener('fetch', (e) => {
             .catch(() => caches.match(e.request))
     );
 });
-

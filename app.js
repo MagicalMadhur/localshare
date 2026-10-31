@@ -661,7 +661,7 @@ function uploadToStoCare(file, onProgress) {
         xhr.open('POST', 'https://ul.sto.care');
         xhr.upload.onprogress = e => {
             if (e.lengthComputable && onProgress) {
-                const percent = Math.round((e.loaded / e.total) * 100);
+                const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
                 onProgress(percent);
             }
         };
@@ -670,6 +670,7 @@ function uploadToStoCare(file, onProgress) {
                 try {
                     const data = JSON.parse(xhr.responseText);
                     if (data && data.url) {
+                        if (onProgress) onProgress(100);
                         resolve({
                             url: data.url,
                             provider: 'stocare'
@@ -682,7 +683,7 @@ function uploadToStoCare(file, onProgress) {
         };
         xhr.onerror = () => reject(new Error('StoCare network error'));
         xhr.ontimeout = () => reject(new Error('StoCare timeout'));
-        xhr.timeout = 60000;
+        xhr.timeout = 120000;
         xhr.send(fd);
     });
 }
@@ -696,7 +697,7 @@ function uploadToTmpfiles(file, onProgress) {
         xhr.open('POST', 'https://tmpfiles.org/api/v1/upload');
         xhr.upload.onprogress = e => {
             if (e.lengthComputable && onProgress) {
-                const percent = Math.round((e.loaded / e.total) * 100);
+                const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
                 onProgress(percent);
             }
         };
@@ -707,6 +708,7 @@ function uploadToTmpfiles(file, onProgress) {
                     if (data.status === 'success' && data.data && data.data.url) {
                         const rawUrl = data.data.url;
                         const dlUrl = rawUrl.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+                        if (onProgress) onProgress(100);
                         resolve({
                             url: dlUrl,
                             provider: 'tmpfiles'
@@ -719,7 +721,7 @@ function uploadToTmpfiles(file, onProgress) {
         };
         xhr.onerror = () => reject(new Error('Tmpfiles network error'));
         xhr.ontimeout = () => reject(new Error('Tmpfiles timeout'));
-        xhr.timeout = 60000;
+        xhr.timeout = 120000;
         xhr.send(fd);
     });
 }
@@ -738,11 +740,11 @@ async function uploadCloudFile(file) {
     try {
         let result = null;
         try {
-            updateProgress(10, 'Cloudflare edge');
+            updateProgress(0, 'Cloudflare edge');
             result = await uploadToStoCare(file, pct => updateProgress(pct, 'Cloudflare edge'));
         } catch (scErr) {
             console.warn('StoCare upload failed, trying backup cloud provider...', scErr);
-            updateProgress(10, 'backup cloud');
+            updateProgress(0, 'backup cloud');
             result = await uploadToTmpfiles(file, pct => updateProgress(pct, 'backup cloud'));
         }
 
@@ -756,7 +758,11 @@ async function uploadCloudFile(file) {
             timestamp: Date.now()
         };
 
-        if (uploadEl) uploadEl.remove();
+        if (uploadEl) {
+            uploadEl.classList.add('done');
+            await new Promise(r => setTimeout(r, 400));
+            uploadEl.remove();
+        }
 
         // Update local catalog and broadcast
         filesCatalog = filesCatalog.filter(f => f.name !== file.name);
@@ -1001,11 +1007,11 @@ function createActiveUploadUI(id, name, size) {
             </div>
             <div class="file-meta">
                 <span>${formatBytes(size)}</span>
-                <span class="speed">Saving to cloud (7 days)...</span>
+                <span class="speed">Connecting to Cloudflare edge...</span>
             </div>
         </div>
         <div class="progress-bar-container">
-            <div class="progress-bar" style="width: 75%; animation: pulse 1s infinite alternate;"></div>
+            <div class="progress-bar" style="width: 0%;"></div>
         </div>
     `;
     activeUploadsContainer.prepend(el);
