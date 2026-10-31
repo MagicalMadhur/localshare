@@ -1,9 +1,9 @@
-const CACHE_NAME = 'localshare-v9';
+const CACHE_NAME = 'localshare-v11';
 const ASSETS = [
     './',
     './index.html',
-    './style.css?v=9',
-    './app.js?v=9',
+    './style.css?v=11',
+    './app.js?v=11',
     './manifest.json',
     './icon.svg'
 ];

@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#0f172a">
     <link rel="apple-touch-icon" href="icon.svg">
     
-    <link rel="stylesheet" href="style.css?v=9">
+    <link rel="stylesheet" href="style.css?v=11">
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- MQTT.js for signaling -->
@@ -111,7 +111,46 @@
         <button id="undoToastBtn" class="btn-undo">Undo</button>
     </div>
 
-    <script src="app.js?v=9" defer></script>
+    <!-- In-App Image Preview Modal (Google Drive Style) -->
+    <div id="imagePreviewModal" class="image-preview-modal hidden" role="dialog" aria-modal="true" aria-label="Image preview">
+        <div class="image-preview-backdrop" id="previewBackdrop"></div>
+        <div class="image-preview-header">
+            <div class="preview-file-info">
+                <span class="preview-badge">IMG</span>
+                <div class="preview-text-meta">
+                    <span id="previewFileName" class="preview-filename">image.png</span>
+                    <span id="previewFileMeta" class="preview-filemeta">0 KB • just now</span>
+                </div>
+            </div>
+            <div class="preview-actions">
+                <button id="previewDownloadBtn" class="preview-btn" title="Download image">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    <span>Download</span>
+                </button>
+                <button id="previewOpenTabBtn" class="preview-btn icon-only" title="Open original in new tab">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                </button>
+                <button id="previewCloseBtn" class="preview-btn icon-only close" title="Close (Esc)">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="image-preview-body" id="previewBody">
+            <button id="previewPrevBtn" class="preview-nav-btn prev hidden" title="Previous image (Left arrow)" aria-label="Previous image">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+            <div class="image-preview-wrapper">
+                <div class="preview-spinner hidden" id="previewSpinner"></div>
+                <img id="previewImage" class="preview-image" src="" alt="Preview" />
+            </div>
+            <button id="previewNextBtn" class="preview-nav-btn next hidden" title="Next image (Right arrow)" aria-label="Next image">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </button>
+        </div>
+    </div>
+
+    <script src="app.js?v=11" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

@@ -52,6 +52,21 @@ const undoToast = document.getElementById('undoToast');
 const undoToastMsg = document.getElementById('undoToastMsg');
 const undoToastBtn = document.getElementById('undoToastBtn');
 
+// Image Preview Modal Elements & State
+let currentPreviewIndex = -1;
+let previewImagesList = [];
+const imagePreviewModal = document.getElementById('imagePreviewModal');
+const previewBackdrop = document.getElementById('previewBackdrop');
+const previewFileName = document.getElementById('previewFileName');
+const previewFileMeta = document.getElementById('previewFileMeta');
+const previewImage = document.getElementById('previewImage');
+const previewSpinner = document.getElementById('previewSpinner');
+const previewDownloadBtn = document.getElementById('previewDownloadBtn');
+const previewOpenTabBtn = document.getElementById('previewOpenTabBtn');
+const previewCloseBtn = document.getElementById('previewCloseBtn');
+const previewPrevBtn = document.getElementById('previewPrevBtn');
+const previewNextBtn = document.getElementById('previewNextBtn');
+
 // --- Initialization ---
 
 async function init() {
@@ -708,8 +723,7 @@ function uploadToStoCare(file, onProgress) {
         xhr.open('POST', 'https://ul.sto.care');
         xhr.upload.onprogress = e => {
             if (e.lengthComputable && onProgress) {
-                const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
-                onProgress(percent);
+                onProgress(e.loaded, e.total);
             }
         };
         xhr.onload = () => {
@@ -717,7 +731,7 @@ function uploadToStoCare(file, onProgress) {
                 try {
                     const data = JSON.parse(xhr.responseText);
                     if (data && data.url) {
-                        if (onProgress) onProgress(100);
+                        if (onProgress) onProgress(file.size, file.size);
                         resolve({
                             url: data.url,
                             provider: 'stocare'
@@ -730,7 +744,72 @@ function uploadToStoCare(file, onProgress) {
         };
         xhr.onerror = () => reject(new Error('StoCare network error'));
         xhr.ontimeout = () => reject(new Error('StoCare timeout'));
-        xhr.timeout = 120000;
+        // Dynamic timeout based on file size: minimum 3 minutes, or 30 KB/s transfer time
+        xhr.timeout = Math.max(180000, Math.ceil(file.size / 30000) * 1000);
+        xhr.send(fd);
+    });
+}
+
+async function uploadToStoCareWithRetry(file, onProgress, maxAttempts = 3) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await uploadToStoCare(file, onProgress);
+        } catch (err) {
+            lastErr = err;
+            console.warn(`StoCare upload attempt ${attempt} failed:`, err);
+            if (attempt < maxAttempts) {
+                await new Promise(r => setTimeout(r, 1200 * attempt));
+            }
+        }
+    }
+    throw lastErr;
+}
+
+async function uploadToGofile(file, onProgress) {
+    let server = 'store8';
+    try {
+        const sRes = await fetch('https://api.gofile.io/servers');
+        if (sRes.ok) {
+            const sData = await sRes.json();
+            if (sData?.data?.servers?.[0]?.name) {
+                server = sData.data.servers[0].name;
+            }
+        }
+    } catch (e) {
+        console.warn('Gofile server lookup fallback to store8', e);
+    }
+
+    return new Promise((resolve, reject) => {
+        const fd = new FormData();
+        fd.append('file', file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `https://${server}.gofile.io/contents/uploadfile`);
+        xhr.upload.onprogress = e => {
+            if (e.lengthComputable && onProgress) {
+                onProgress(e.loaded, e.total);
+            }
+        };
+        xhr.onload = () => {
+            if (xhr.status === 200) {
+                try {
+                    const data = JSON.parse(xhr.responseText);
+                    if (data.status === 'ok' && data.data && data.data.downloadPage) {
+                        if (onProgress) onProgress(file.size, file.size);
+                        resolve({
+                            url: data.data.downloadPage,
+                            provider: 'gofile'
+                        });
+                        return;
+                    }
+                } catch (e) {}
+            }
+            reject(new Error('Gofile returned HTTP ' + xhr.status));
+        };
+        xhr.onerror = () => reject(new Error('Gofile network error'));
+        xhr.ontimeout = () => reject(new Error('Gofile timeout'));
+        xhr.timeout = Math.max(180000, Math.ceil(file.size / 30000) * 1000);
         xhr.send(fd);
     });
 }
@@ -744,8 +823,7 @@ function uploadToTmpfiles(file, onProgress) {
         xhr.open('POST', 'https://tmpfiles.org/api/v1/upload');
         xhr.upload.onprogress = e => {
             if (e.lengthComputable && onProgress) {
-                const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
-                onProgress(percent);
+                onProgress(e.loaded, e.total);
             }
         };
         xhr.onload = () => {
@@ -755,7 +833,7 @@ function uploadToTmpfiles(file, onProgress) {
                     if (data.status === 'success' && data.data && data.data.url) {
                         const rawUrl = data.data.url;
                         const dlUrl = rawUrl.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-                        if (onProgress) onProgress(100);
+                        if (onProgress) onProgress(file.size, file.size);
                         resolve({
                             url: dlUrl,
                             provider: 'tmpfiles'
@@ -768,7 +846,7 @@ function uploadToTmpfiles(file, onProgress) {
         };
         xhr.onerror = () => reject(new Error('Tmpfiles network error'));
         xhr.ontimeout = () => reject(new Error('Tmpfiles timeout'));
-        xhr.timeout = 120000;
+        xhr.timeout = Math.max(180000, Math.ceil(file.size / 30000) * 1000);
         xhr.send(fd);
     });
 }
@@ -779,20 +857,29 @@ async function uploadCloudFile(file) {
     const progressBar = uploadEl ? uploadEl.querySelector('.progress-bar') : null;
     const speedText = uploadEl ? uploadEl.querySelector('.speed') : null;
 
-    const updateProgress = (pct, label = 'Cloudflare edge') => {
+    const updateProgress = (loaded, total, label = 'Cloudflare edge') => {
+        const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
         if (progressBar) progressBar.style.width = `${pct}%`;
-        if (speedText) speedText.textContent = `Uploading to ${label}... ${pct}%`;
+        if (speedText) {
+            speedText.textContent = `${label} · ${formatBytes(loaded)} / ${formatBytes(total)} (${pct}%)`;
+        }
     };
 
     try {
         let result = null;
         try {
-            updateProgress(0, 'Cloudflare edge');
-            result = await uploadToStoCare(file, pct => updateProgress(pct, 'Cloudflare edge'));
+            updateProgress(0, file.size, 'Cloudflare edge');
+            result = await uploadToStoCareWithRetry(file, (loaded, total) => updateProgress(loaded, total, 'Cloudflare edge'));
         } catch (scErr) {
-            console.warn('StoCare upload failed, trying backup cloud provider...', scErr);
-            updateProgress(0, 'backup cloud');
-            result = await uploadToTmpfiles(file, pct => updateProgress(pct, 'backup cloud'));
+            console.warn('StoCare upload failed after retries, trying backup cloud provider (Gofile)...', scErr);
+            try {
+                updateProgress(0, file.size, 'Backup cloud');
+                result = await uploadToGofile(file, (loaded, total) => updateProgress(loaded, total, 'Backup cloud'));
+            } catch (gfErr) {
+                console.warn('Gofile upload failed, trying Tmpfiles fallback...', gfErr);
+                updateProgress(0, file.size, 'Tmpfiles fallback');
+                result = await uploadToTmpfiles(file, (loaded, total) => updateProgress(loaded, total, 'Tmpfiles fallback'));
+            }
         }
 
         const fileObj = {
@@ -807,6 +894,8 @@ async function uploadCloudFile(file) {
 
         if (uploadEl) {
             uploadEl.classList.add('done');
+            if (progressBar) progressBar.style.width = '100%';
+            if (speedText) speedText.textContent = 'Upload complete!';
             await new Promise(r => setTimeout(r, 400));
             uploadEl.remove();
         }
@@ -827,6 +916,10 @@ async function uploadCloudFile(file) {
 function downloadFile(fileId) {
     const file = filesCatalog.find(f => f.id === fileId);
     if (!file) return;
+    if (file.provider === 'gofile') {
+        window.open(file.url, '_blank');
+        return;
+    }
     const a = document.createElement('a');
     a.href = file.url;
     a.download = file.name;
@@ -897,6 +990,10 @@ async function downloadAllZip() {
 async function deleteCloudFile(fileId) {
     const file = filesCatalog.find(f => f.id === fileId);
     if (!file) return;
+
+    if (currentPreviewIndex !== -1 && previewImagesList[currentPreviewIndex]?.id === fileId) {
+        closeImagePreview();
+    }
 
     // Stash for undo
     lastDeletedFile = file;
@@ -981,11 +1078,25 @@ function renderFilesList() {
         card.className = 'file-card';
         card.dataset.id = file.id;
 
-        const { category, label } = getFileCategory(file.name, file.type);
+        const { category, label, isImage } = getFileCategory(file.name, file.type);
+
+        const iconHtml = (isImage && file.url) ? `
+            <div class="file-icon-box image has-thumbnail" title="Click to preview">
+                <img src="${escapeHtml(file.url)}" alt="${escapeHtml(file.name)}" class="file-thumbnail-img" loading="lazy" onerror="this.style.display='none'; this.parentElement.classList.remove('has-thumbnail'); this.parentElement.textContent='${label}';" />
+            </div>
+        ` : `
+            <div class="file-icon-box ${category}">${label}</div>
+        `;
+
+        const previewBtnHtml = isImage ? `
+            <button class="file-action-btn preview" title="Preview image">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            </button>
+        ` : '';
 
         card.innerHTML = `
-            <div class="file-card-main">
-                <div class="file-icon-box ${category}">${label}</div>
+            <div class="file-card-main ${isImage ? 'clickable' : ''}" title="${isImage ? 'Click to preview' : ''}">
+                ${iconHtml}
                 <div class="file-details">
                     <div class="file-title" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
                     <div class="file-submeta">
@@ -996,6 +1107,7 @@ function renderFilesList() {
                 </div>
             </div>
             <div class="file-actions">
+                ${previewBtnHtml}
                 <button class="file-action-btn download" title="Download">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                 </button>
@@ -1005,8 +1117,15 @@ function renderFilesList() {
             </div>
         `;
 
-        card.querySelector('.download').onclick = () => downloadFile(file.id);
-        card.querySelector('.delete').onclick = () => deleteCloudFile(file.id);
+        if (isImage) {
+            const cardMain = card.querySelector('.file-card-main');
+            if (cardMain) cardMain.onclick = () => openImagePreview(file.id);
+            const prevBtn = card.querySelector('.file-action-btn.preview');
+            if (prevBtn) prevBtn.onclick = (e) => { e.stopPropagation(); openImagePreview(file.id); };
+        }
+
+        card.querySelector('.download').onclick = (e) => { e.stopPropagation(); downloadFile(file.id); };
+        card.querySelector('.delete').onclick = (e) => { e.stopPropagation(); deleteCloudFile(file.id); };
 
         filesListContainer.appendChild(card);
     });
@@ -1015,18 +1134,18 @@ function renderFilesList() {
 function getFileCategory(filename, mimeType = '') {
     const ext = filename.split('.').pop().toLowerCase();
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext) || mimeType.startsWith('image/')) {
-        return { category: 'image', label: ext.substring(0, 3).toUpperCase() || 'IMG' };
+        return { category: 'image', label: ext.substring(0, 3).toUpperCase() || 'IMG', isImage: true };
     }
     if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2'].includes(ext)) {
-        return { category: 'archive', label: 'ZIP' };
+        return { category: 'archive', label: 'ZIP', isImage: false };
     }
     if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'mp3', 'wav', 'ogg', 'm4a'].includes(ext) || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
-        return { category: 'media', label: ext.substring(0, 3).toUpperCase() || 'MED' };
+        return { category: 'media', label: ext.substring(0, 3).toUpperCase() || 'MED', isImage: false };
     }
     if (['pdf', 'doc', 'docx', 'txt', 'rtf', 'xlsx', 'csv', 'pptx'].includes(ext)) {
-        return { category: 'document', label: ext.substring(0, 3).toUpperCase() || 'DOC' };
+        return { category: 'document', label: ext.substring(0, 3).toUpperCase() || 'DOC', isImage: false };
     }
-    return { category: 'default', label: ext.substring(0, 3).toUpperCase() || 'FILE' };
+    return { category: 'default', label: ext.substring(0, 3).toUpperCase() || 'FILE', isImage: false };
 }
 
 function timeAgo(timestamp) {
@@ -1139,6 +1258,104 @@ function formatBytes(bytes, decimals = 2) {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
+// --- In-App Image Preview (Google Drive Style) ---
+
+function openImagePreview(fileId) {
+    if (!imagePreviewModal) return;
+
+    previewImagesList = filesCatalog.filter(f => {
+        const cat = getFileCategory(f.name, f.type);
+        return cat.isImage && f.url;
+    });
+
+    currentPreviewIndex = previewImagesList.findIndex(f => f.id === fileId);
+    if (currentPreviewIndex === -1) return;
+
+    renderActivePreview();
+    imagePreviewModal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+}
+
+function renderActivePreview() {
+    if (currentPreviewIndex < 0 || currentPreviewIndex >= previewImagesList.length) return;
+    const file = previewImagesList[currentPreviewIndex];
+
+    if (previewFileName) {
+        previewFileName.textContent = file.name;
+        previewFileName.title = file.name;
+    }
+    if (previewFileMeta) {
+        previewFileMeta.textContent = `${formatBytes(file.size)} • ${timeAgo(file.timestamp)}`;
+    }
+
+    if (previewSpinner) previewSpinner.classList.remove('hidden');
+    if (previewImage) {
+        previewImage.style.opacity = '0';
+        previewImage.onload = () => {
+            if (previewSpinner) previewSpinner.classList.add('hidden');
+            previewImage.style.opacity = '1';
+        };
+        previewImage.onerror = () => {
+            if (previewSpinner) previewSpinner.classList.add('hidden');
+            previewImage.style.opacity = '1';
+        };
+        previewImage.src = file.url;
+        previewImage.alt = file.name;
+    }
+
+    // Prev / Next button visibility
+    if (previewImagesList.length > 1) {
+        if (previewPrevBtn) previewPrevBtn.classList.remove('hidden');
+        if (previewNextBtn) previewNextBtn.classList.remove('hidden');
+    } else {
+        if (previewPrevBtn) previewPrevBtn.classList.add('hidden');
+        if (previewNextBtn) previewNextBtn.classList.add('hidden');
+    }
+
+    if (previewDownloadBtn) {
+        previewDownloadBtn.onclick = () => downloadFile(file.id);
+    }
+    if (previewOpenTabBtn) {
+        previewOpenTabBtn.onclick = () => window.open(file.url, '_blank');
+    }
+}
+
+function closeImagePreview() {
+    if (!imagePreviewModal) return;
+    imagePreviewModal.classList.add('hidden');
+    document.body.style.overflow = '';
+    if (previewImage) previewImage.src = '';
+    currentPreviewIndex = -1;
+}
+
+function showPrevImage() {
+    if (previewImagesList.length <= 1) return;
+    currentPreviewIndex = (currentPreviewIndex - 1 + previewImagesList.length) % previewImagesList.length;
+    renderActivePreview();
+}
+
+function showNextImage() {
+    if (previewImagesList.length <= 1) return;
+    currentPreviewIndex = (currentPreviewIndex + 1) % previewImagesList.length;
+    renderActivePreview();
+}
+
+if (previewCloseBtn) previewCloseBtn.onclick = closeImagePreview;
+if (previewBackdrop) previewBackdrop.onclick = closeImagePreview;
+if (previewPrevBtn) previewPrevBtn.onclick = (e) => { e.stopPropagation(); showPrevImage(); };
+if (previewNextBtn) previewNextBtn.onclick = (e) => { e.stopPropagation(); showNextImage(); };
+
+window.addEventListener('keydown', e => {
+    if (imagePreviewModal && !imagePreviewModal.classList.contains('hidden')) {
+        if (e.key === 'Escape') {
+            closeImagePreview();
+        } else if (e.key === 'ArrowLeft') {
+            showPrevImage();
+        } else if (e.key === 'ArrowRight') {
+            showNextImage();
+        }
+    }
+});
 
 // Start application
 init();

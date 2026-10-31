@@ -448,6 +448,39 @@ kbd {
     font-weight: 700;
     font-size: 0.75rem;
     text-transform: uppercase;
+    overflow: hidden;
+    position: relative;
+    user-select: none;
+}
+
+.file-icon-box.has-thumbnail {
+    padding: 0;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    cursor: pointer;
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s, box-shadow 0.2s;
+}
+
+.file-icon-box.has-thumbnail:hover {
+    transform: scale(1.1);
+    border-color: var(--primary);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+}
+
+.file-thumbnail-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    border-radius: 7px;
+}
+
+.file-card-main.clickable {
+    cursor: pointer;
+}
+
+.file-card-main.clickable:hover .file-title {
+    color: var(--primary);
 }
 
 .file-icon-box.image { background: rgba(139, 92, 246, 0.2); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.3); }
@@ -505,6 +538,12 @@ kbd {
     background: rgba(255, 255, 255, 0.15);
 }
 
+.file-action-btn.preview:hover {
+    color: #a78bfa;
+    border-color: rgba(167, 139, 250, 0.4);
+    background: rgba(139, 92, 246, 0.15);
+}
+
 .file-action-btn.download:hover {
     color: #60a5fa;
     border-color: rgba(96, 165, 250, 0.4);
@@ -555,6 +594,199 @@ kbd {
 
 .hidden { display: none !important; }
 
+/* --- In-App Image Preview Modal (Google Drive Style) --- */
+.image-preview-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: previewFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes previewFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.image-preview-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 15, 29, 0.94);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    z-index: 1;
+}
+
+.image-preview-header {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.85rem 1.5rem;
+    background: rgba(15, 23, 42, 0.8);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    gap: 1rem;
+}
+
+.preview-file-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.preview-badge {
+    background: rgba(139, 92, 246, 0.25);
+    color: #a78bfa;
+    border: 1px solid rgba(139, 92, 246, 0.4);
+    padding: 0.2rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+.preview-text-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.preview-filename {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #f1f5f9;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 48vw;
+}
+
+.preview-filemeta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.preview-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.preview-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #f1f5f9;
+    padding: 0.45rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.preview-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.25);
+}
+
+.preview-btn.icon-only {
+    padding: 0.45rem;
+    width: 36px;
+    height: 36px;
+    justify-content: center;
+}
+
+.preview-btn.close:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #f87171;
+}
+
+.image-preview-body {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    min-height: 0;
+}
+
+.image-preview-wrapper {
+    position: relative;
+    max-width: 90vw;
+    max-height: 80vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.preview-image {
+    max-width: 90vw;
+    max-height: 80vh;
+    object-fit: contain;
+    border-radius: 8px;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7);
+    transition: opacity 0.2s ease;
+    animation: previewZoom 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes previewZoom {
+    from { transform: scale(0.96); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+
+.preview-spinner {
+    position: absolute;
+    width: 44px;
+    height: 44px;
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: previewSpin 0.7s linear infinite;
+}
+
+@keyframes previewSpin {
+    to { transform: rotate(360deg); }
+}
+
+.preview-nav-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: rgba(15, 23, 42, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #f1f5f9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    backdrop-filter: blur(8px);
+    z-index: 4;
+}
+
+.preview-nav-btn:hover {
+    background: rgba(99, 102, 241, 0.4);
+    border-color: rgba(99, 102, 241, 0.7);
+    transform: translateY(-50%) scale(1.1);
+}
+
+.preview-nav-btn.prev { left: 1.5rem; }
+.preview-nav-btn.next { right: 1.5rem; }
+
 @media (max-width: 600px) {
     .container { padding: 1rem; }
     .card { padding: 1rem; }
@@ -565,4 +797,10 @@ kbd {
         left: 12px;
         justify-content: space-between;
     }
+    .image-preview-header { padding: 0.65rem 0.85rem; }
+    .preview-filename { max-width: 40vw; }
+    .preview-btn span { display: none; }
+    .preview-nav-btn { width: 38px; height: 38px; }
+    .preview-nav-btn.prev { left: 0.5rem; }
+    .preview-nav-btn.next { right: 0.5rem; }
 }
