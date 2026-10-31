@@ -71,46 +71,63 @@ async function init() {
     }
 }
 
+function isIPv4(ip) {
+    if (!ip || typeof ip !== 'string') return false;
+    const parts = ip.trim().split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(part => {
+        const num = Number(part);
+        return Number.isInteger(num) && num >= 0 && num <= 255 && String(num) === part;
+    });
+}
+
 async function getPublicIP() {
     try {
         const cached = sessionStorage.getItem('localshare_cached_ip');
-        if (cached) return cached;
+        if (cached && isIPv4(cached)) return cached.trim();
+        sessionStorage.removeItem('localshare_cached_ip');
     } catch (e) {}
 
     const fetchCF = async () => {
         const res = await fetch('https://1.1.1.1/cdn-cgi/trace', { signal: AbortSignal.timeout(3000) });
         const text = await res.text();
         const match = text.match(/^ip=(.+)$/m);
-        if (match && match[1]) return match[1].trim();
-        throw new Error('No IP in trace');
+        if (match && match[1] && isIPv4(match[1])) return match[1].trim();
+        throw new Error('No IPv4 in trace');
     };
 
     const fetchIpify = async () => {
         const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
         const data = await res.json();
-        if (data && data.ip) return data.ip.trim();
-        throw new Error('No IP in ipify');
+        if (data && data.ip && isIPv4(data.ip)) return data.ip.trim();
+        throw new Error('No IPv4 in ipify');
     };
 
     const fetchIcanhaz = async () => {
-        const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(3000) });
+        const res = await fetch('https://ipv4.icanhazip.com', { signal: AbortSignal.timeout(3000) });
         const text = await res.text();
-        if (text) return text.trim();
-        throw new Error('No IP in icanhaz');
+        if (text && isIPv4(text.trim())) return text.trim();
+        throw new Error('No IPv4 in icanhaz');
     };
 
     try {
-        // Race all three endpoints in parallel; whichever finishes first wins
+        // Race IPv4 endpoints in parallel
         const ip = await Promise.any([fetchCF(), fetchIpify(), fetchIcanhaz()]);
         try {
             sessionStorage.setItem('localshare_cached_ip', ip);
         } catch (e) {}
+        console.log(`[LocalShare] Detected router IPv4: ${ip}`);
         return ip;
     } catch (err) {
-        console.warn('All primary IP racing failed, trying fallback...', err);
-        const res = await fetch('https://icanhazip.com');
+        console.warn('All primary IPv4 racing failed, trying fallback...', err);
+        const res = await fetch('https://ipv4.icanhazip.com');
         const text = await res.text();
-        return text.trim();
+        const ip = text.trim();
+        if (isIPv4(ip)) {
+            try { sessionStorage.setItem('localshare_cached_ip', ip); } catch (e) {}
+            return ip;
+        }
+        throw new Error('Could not resolve valid IPv4 address');
     }
 }
 
