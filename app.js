@@ -73,12 +73,42 @@ async function init() {
 
 async function getPublicIP() {
     try {
-        const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(4000) });
+        const cached = sessionStorage.getItem('localshare_cached_ip');
+        if (cached) return cached;
+    } catch (e) {}
+
+    const fetchCF = async () => {
+        const res = await fetch('https://1.1.1.1/cdn-cgi/trace', { signal: AbortSignal.timeout(3000) });
+        const text = await res.text();
+        const match = text.match(/^ip=(.+)$/m);
+        if (match && match[1]) return match[1].trim();
+        throw new Error('No IP in trace');
+    };
+
+    const fetchIpify = async () => {
+        const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
         const data = await res.json();
-        return data.ip;
-    } catch (e) {
-        console.warn('Primary IP service failed, trying fallback...', e);
-        const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(4000) });
+        if (data && data.ip) return data.ip.trim();
+        throw new Error('No IP in ipify');
+    };
+
+    const fetchIcanhaz = async () => {
+        const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(3000) });
+        const text = await res.text();
+        if (text) return text.trim();
+        throw new Error('No IP in icanhaz');
+    };
+
+    try {
+        // Race all three endpoints in parallel; whichever finishes first wins
+        const ip = await Promise.any([fetchCF(), fetchIpify(), fetchIcanhaz()]);
+        try {
+            sessionStorage.setItem('localshare_cached_ip', ip);
+        } catch (e) {}
+        return ip;
+    } catch (err) {
+        console.warn('All primary IP racing failed, trying fallback...', err);
+        const res = await fetch('https://icanhazip.com');
         const text = await res.text();
         return text.trim();
     }
@@ -788,56 +818,61 @@ function downloadFile(fileId) {
     document.body.removeChild(a);
 }
 
+function loadJSZip() {
+    if (typeof JSZip !== 'undefined') return Promise.resolve(window.JSZip);
+    return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+        s.onload = () => resolve(window.JSZip);
+        s.onerror = () => reject(new Error('Failed to load JSZip'));
+        document.head.appendChild(s);
+    });
+}
+
 async function downloadAllZip() {
     if (!filesCatalog || filesCatalog.length === 0) return;
 
-    if (typeof JSZip !== 'undefined') {
-        const originalText = downloadAllBtn ? downloadAllBtn.innerHTML : '';
-        if (downloadAllBtn) {
-            downloadAllBtn.disabled = true;
-            downloadAllBtn.textContent = 'Preparing .zip...';
+    const originalText = downloadAllBtn ? downloadAllBtn.innerHTML : '';
+    if (downloadAllBtn) {
+        downloadAllBtn.disabled = true;
+        downloadAllBtn.textContent = 'Preparing .zip...';
+    }
+
+    try {
+        await loadJSZip();
+        const zip = new JSZip();
+        for (let i = 0; i < filesCatalog.length; i++) {
+            const file = filesCatalog[i];
+            if (downloadAllBtn) downloadAllBtn.textContent = `Fetching (${i + 1}/${filesCatalog.length})...`;
+            try {
+                const res = await fetch(file.url);
+                const blob = await res.blob();
+                zip.file(file.name, blob);
+            } catch (e) {
+                console.warn('Failed to fetch file for zip:', file.name, e);
+            }
         }
 
-        try {
-            const zip = new JSZip();
-            for (let i = 0; i < filesCatalog.length; i++) {
-                const file = filesCatalog[i];
-                if (downloadAllBtn) downloadAllBtn.textContent = `Fetching (${i + 1}/${filesCatalog.length})...`;
-                try {
-                    const res = await fetch(file.url);
-                    const blob = await res.blob();
-                    zip.file(file.name, blob);
-                } catch (e) {
-                    console.warn('Failed to fetch file for zip:', file.name, e);
-                }
-            }
-
-            if (downloadAllBtn) downloadAllBtn.textContent = 'Generating .zip...';
-            const zipBlob = await zip.generateAsync({ type: 'blob' });
-            const zipUrl = URL.createObjectURL(zipBlob);
-            const a = document.createElement('a');
-            a.href = zipUrl;
-            a.download = `LocalShare-files-${new Date().toISOString().slice(0, 10)}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(zipUrl), 30000);
-        } catch (err) {
-            console.error('Client zip error:', err);
-            for (const file of filesCatalog) {
-                downloadFile(file.id);
-                await new Promise(r => setTimeout(r, 400));
-            }
-        } finally {
-            if (downloadAllBtn) {
-                downloadAllBtn.disabled = false;
-                downloadAllBtn.innerHTML = originalText;
-            }
-        }
-    } else {
+        if (downloadAllBtn) downloadAllBtn.textContent = 'Generating .zip...';
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipUrl = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = zipUrl;
+        a.download = `LocalShare-files-${new Date().toISOString().slice(0, 10)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(zipUrl), 30000);
+    } catch (err) {
+        console.error('Client zip error:', err);
         for (const file of filesCatalog) {
             downloadFile(file.id);
             await new Promise(r => setTimeout(r, 400));
+        }
+    } finally {
+        if (downloadAllBtn) {
+            downloadAllBtn.disabled = false;
+            downloadAllBtn.innerHTML = originalText;
         }
     }
 }
